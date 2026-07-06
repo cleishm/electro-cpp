@@ -2,7 +2,7 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO cleishm/electro-cpp
     REF "v${VERSION}"
-    SHA512 0 # TODO: update with the release tarball hash when publishing
+    SHA512 d5c11e80af17d126e55a85785c2cb461c34404af7efafda8450b0093e280cd88e4c88733f395ca94bb997ac76edd7a8fdd6a4261e56f061cac6659717e41c3b3
     HEAD_REF main
 )
 
