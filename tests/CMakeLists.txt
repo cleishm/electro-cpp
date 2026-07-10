@@ -9,6 +9,7 @@ FetchContent_MakeAvailable(Catch2)
 
 add_executable(electro_tests
     electro_test.cpp
+    decibel_test.cpp
 )
 
 target_link_libraries(electro_tests PRIVATE
