@@ -345,6 +345,24 @@ TEST_CASE("std::format support", "[format]") {
         std::format("battery: {} at {}", milliampere_hours(2000), millivolts(3700)) == "battery: 2000mAh at 3700mV"
     );
 }
+
+TEST_CASE("std::format with spec renders in display units", "[format]") {
+    // A floating-point format spec renders the value in the base unit.
+    REQUIRE(std::format("{:.1f}", millivolts(3300)) == "3.3V");
+    REQUIRE(std::format("{:.2f}", millivolts(3312)) == "3.31V");
+    REQUIRE(std::format("{:.1f}", kilovolts(5)) == "5000.0V");
+    REQUIRE(std::format("{:g}", microamperes(1500)) == "0.0015A");
+    REQUIRE(std::format("{:.1f}", milliohms(4700)) == "4.7Ω");
+
+    // Width and alignment pass through to the numeric part.
+    REQUIRE(std::format("{:7.1f}", millivolts(3300)) == "    3.3V");
+
+    // Conventional non-decade precisions render in their conventional unit.
+    REQUIRE(std::format("{:.1f}", milliampere_hours(200)) == "0.2Ah");
+    REQUIRE(std::format("{:.1f}", ampere_hours(2)) == "2.0Ah");
+    REQUIRE(std::format("{:.1f}", watt_hours(500)) == "500.0Wh");
+    REQUIRE(std::format("{:.0f}", kilowatt_hours(2)) == "2000Wh");
+}
 #endif
 
 TEST_CASE("battery runtime example", "[integration]") {

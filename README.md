@@ -88,6 +88,14 @@ if (kilovolts{1} == volts{1000}) {
 
 // String conversion
 std::string s = to_string(kiloohms(10));  // "10kΩ"
+
+// Formatting: a floating-point format spec renders in display units
+// (base unit, or the conventional unit for Ah/Wh precisions), while the
+// default renders the exact stored value.
+millivolts reading{3300};
+std::string disp = std::format("{:.1f}", reading);  // "3.3V"
+std::string raw  = std::format("{}", reading);      // "3300mV" (exact stored value)
+std::format("{:.1f}", milliampere_hours(200));      // "0.2Ah"
 ```
 
 ### Cross-Quantity Arithmetic

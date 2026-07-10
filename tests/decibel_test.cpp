@@ -291,6 +291,17 @@ TEST_CASE("std::format support for levels and gains", "[format]") {
     REQUIRE(std::format("{}", 1050_cdB) == "10.50dB");
     REQUIRE(std::format("rx {} with {} margin", -66_dBm, 34_dB) == "rx -66dBm with 34dB margin");
 }
+
+TEST_CASE("std::format with spec renders gains and levels in decibels", "[format]") {
+    // A floating-point format spec renders the value in decibels.
+    REQUIRE(std::format("{:.1f}", 1050_cdB) == "10.5dB");
+    REQUIRE(std::format("{:.0f}", 20_dB) == "20dB");
+    REQUIRE(std::format("{:.1f}", 1301_cdBm) == "13.0dBm");
+    REQUIRE(std::format("{:.2f}", -73_dBm) == "-73.00dBm");
+
+    // Width and alignment pass through to the numeric part.
+    REQUIRE(std::format("{:6.1f}", 1050_cdB) == "  10.5dB");
+}
 #endif
 
 TEST_CASE("link budget example", "[integration]") {

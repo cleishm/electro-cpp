@@ -1199,6 +1199,47 @@ struct quantity_suffix<joule_unit, std::ratio<3600000>> {
 
 template<typename Unit, typename Precision>
 concept _has_suffix = requires { quantity_suffix<Unit, Precision>::value(); };
+
+// Display family for a (unit, precision) pair when a format spec is given:
+// the value is rendered in `scale`-sized units labeled `suffix`. SI-prefixed
+// precisions render in the base unit ("3.3V"); conventional non-decade
+// precisions render in their conventional unit ("0.2Ah", never "720.0C").
+template<typename Unit, typename Precision>
+struct _display_unit {
+    using scale = std::ratio<1>;
+    static constexpr const char* suffix = Unit::symbol;
+};
+
+struct _ampere_hour_display_unit {
+    using scale = std::ratio<3600>;
+    static constexpr const char* suffix = "Ah";
+};
+
+struct _watt_hour_display_unit {
+    using scale = std::ratio<3600>;
+    static constexpr const char* suffix = "Wh";
+};
+
+template<>
+struct _display_unit<coulomb_unit, std::ratio<18, 5>> : _ampere_hour_display_unit {};
+
+template<>
+struct _display_unit<coulomb_unit, std::ratio<3600>> : _ampere_hour_display_unit {};
+
+template<>
+struct _display_unit<joule_unit, std::ratio<3600>> : _watt_hour_display_unit {};
+
+template<>
+struct _display_unit<joule_unit, std::ratio<3600000>> : _watt_hour_display_unit {};
+
+// Appends a NUL-terminated string to a format output iterator.
+template<typename OutputIt>
+constexpr OutputIt _format_append(OutputIt out, const char* s) {
+    for (; *s != '\0'; ++s) {
+        *out++ = *s;
+    }
+    return out;
+}
 /** @endcond */
 
 /**
@@ -1235,12 +1276,38 @@ public:
 };
 
 #if CONFIG_ELECTRO_STD_FORMAT
+// "{}" prints the exact stored count with a precision-qualified unit
+// (millivolts(3300) -> "3300mV"). A non-empty spec is applied to the value in
+// display units (as double): std::format("{:.1f}", millivolts(3300)) == "3.3V".
+// SI-prefixed precisions display in the base unit; conventional non-decade
+// precisions display in their conventional unit ("0.2Ah").
 template<typename Unit, typename Rep, typename Precision>
     requires electro::_has_suffix<Unit, typename Precision::type>
 struct formatter<electro::quantity<Unit, Rep, Precision>, char> {
-    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+private:
+    using _display = electro::_display_unit<Unit, typename Precision::type>;
+    // display units per count
+    using _upc = typename ratio_divide<typename Precision::type, typename _display::scale>::type;
+    std::formatter<double> _num;
+    bool _has_spec = false;
 
-    auto format(const electro::quantity<Unit, Rep, Precision>& q, format_context& ctx) const {
+public:
+    constexpr auto parse(format_parse_context& ctx) {
+        auto it = ctx.begin();
+        if (it == ctx.end() || *it == '}') {
+            return it;
+        }
+        _has_spec = true;
+        return _num.parse(ctx);
+    }
+
+    template<typename FormatContext>
+    auto format(const electro::quantity<Unit, Rep, Precision>& q, FormatContext& ctx) const {
+        if (_has_spec) {
+            double value = static_cast<double>(q.count()) * _upc::num / _upc::den;
+            auto out = _num.format(value, ctx);
+            return electro::_format_append(out, _display::suffix);
+        }
         return std::format_to(
             ctx.out(), "{}{}", q.count(), electro::quantity_suffix<Unit, typename Precision::type>::value()
         );

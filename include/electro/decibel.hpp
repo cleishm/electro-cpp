@@ -681,24 +681,65 @@ public:
 };
 
 #if CONFIG_ELECTRO_STD_FORMAT
+// "{}" renders the exact value as a fixed-point decimal ("10.50dB"). A
+// non-empty spec is applied to the value in decibels (as double):
+// std::format("{:.1f}", 1050_cdB) == "10.5dB".
 template<typename Rep, typename Precision>
     requires electro::_is_decimal_precision<typename Precision::type>
 struct formatter<electro::quantity<electro::decibel_unit, Rep, Precision>, char> {
-    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+private:
+    std::formatter<double> _num;
+    bool _has_spec = false;
 
-    auto format(const electro::quantity<electro::decibel_unit, Rep, Precision>& g, format_context& ctx) const {
+public:
+    constexpr auto parse(format_parse_context& ctx) {
+        auto it = ctx.begin();
+        if (it == ctx.end() || *it == '}') {
+            return it;
+        }
+        _has_spec = true;
+        return _num.parse(ctx);
+    }
+
+    template<typename FormatContext>
+    auto format(const electro::quantity<electro::decibel_unit, Rep, Precision>& g, FormatContext& ctx) const {
+        if (_has_spec) {
+            double value = static_cast<double>(g.count()) * Precision::num / Precision::den;
+            auto out = _num.format(value, ctx);
+            return electro::_format_append(out, electro::decibel_unit::symbol);
+        }
         return std::format_to(
             ctx.out(), "{}{}", electro::_format_db<typename Precision::type>(g.count()), electro::decibel_unit::symbol
         );
     }
 };
 
+// See the gain formatter above; the level's reference symbol is appended
+// ("13.01dBm", "{:.1f}" -> "13.0dBm").
 template<typename Reference, typename Rep, typename Precision>
     requires electro::_is_decimal_precision<typename Precision::type>
 struct formatter<electro::level<Reference, Rep, Precision>, char> {
-    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+private:
+    std::formatter<double> _num;
+    bool _has_spec = false;
 
-    auto format(const electro::level<Reference, Rep, Precision>& l, format_context& ctx) const {
+public:
+    constexpr auto parse(format_parse_context& ctx) {
+        auto it = ctx.begin();
+        if (it == ctx.end() || *it == '}') {
+            return it;
+        }
+        _has_spec = true;
+        return _num.parse(ctx);
+    }
+
+    template<typename FormatContext>
+    auto format(const electro::level<Reference, Rep, Precision>& l, FormatContext& ctx) const {
+        if (_has_spec) {
+            double value = static_cast<double>(l.count()) * Precision::num / Precision::den;
+            auto out = _num.format(value, ctx);
+            return electro::_format_append(out, Reference::symbol);
+        }
         return std::format_to(
             ctx.out(), "{}{}", electro::_format_db<typename Precision::type>(l.count()), Reference::symbol
         );
