@@ -7,7 +7,7 @@ if(ESP_PLATFORM)
 endif()
 
 project(electro
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "Type-safe electrical units library modeled after std::chrono"
     HOMEPAGE_URL "https://github.com/cleishm/electro-cpp"
     LANGUAGES CXX

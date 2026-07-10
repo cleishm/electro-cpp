@@ -1,6 +1,6 @@
 {
   "name": "cleishm-electro-cpp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Type-safe electrical units library modeled after std::chrono",
   "homepage": "https://github.com/cleishm/electro-cpp",
   "license": "MIT",
