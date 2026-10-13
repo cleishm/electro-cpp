@@ -20,7 +20,7 @@ A type-safe, header-only C++20 library for electrical units, modeled after `std:
 ## Requirements
 
 - C++20 compiler (GCC 12+, Clang 15+, MSVC 19.30+)
-- **MSVC users:** The `/utf-8` flag is required (the source contains unit symbols such as Ω)
+- **MSVC users:** The CMake target adds `/utf-8` automatically (the headers contain UTF-8 unit symbols). Projects that do not use the CMake target (e.g. a plain include path) must add `/utf-8` themselves.
 - **GCC before 14** (including ESP-IDF toolchains before GCC 14) cannot lex non-ASCII literal suffixes, so the
   `_mΩ`, `_Ω`, `_kΩ`, `_MΩ` and `_dBµV` literals are unavailable there (`ELECTRO_HAS_UTF8_LITERALS` is 0); use the
   ASCII alternatives `_mOhm`, `_Ohm`, `_kOhm`, `_MOhm` and `_dBuV`, which are always available
@@ -34,7 +34,7 @@ include(FetchContent)
 FetchContent_Declare(
     electro
     GIT_REPOSITORY https://github.com/cleishm/electro-cpp.git
-    GIT_TAG v0.4.0
+    GIT_TAG v0.4.1
 )
 FetchContent_MakeAvailable(electro)
 
@@ -328,7 +328,7 @@ The library can be used as an ESP-IDF component. Add it to your project's
 
 ```yaml
 dependencies:
-  cleishm/electro: "^0.4.0"
+  cleishm/electro: "^0.4.1"
 ```
 
 `std::format` support is controlled via `CONFIG_ELECTRO_STD_FORMAT` in
