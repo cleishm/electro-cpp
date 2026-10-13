@@ -7,7 +7,7 @@ if(ESP_PLATFORM)
 endif()
 
 project(electro
-    VERSION 0.4.0
+    VERSION 0.4.1
     DESCRIPTION "Type-safe electrical units library modeled after std::chrono"
     HOMEPAGE_URL "https://github.com/cleishm/electro-cpp"
     LANGUAGES CXX
@@ -20,6 +20,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Main library target (header-only)
 add_library(electro INTERFACE)
 add_library(electro::electro ALIAS electro)
+
+# The headers contain UTF-8 unit symbols; MSVC needs /utf-8 to read them correctly.
+target_compile_options(electro INTERFACE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 target_include_directories(electro INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
