@@ -21,6 +21,9 @@ A type-safe, header-only C++20 library for electrical units, modeled after `std:
 
 - C++20 compiler (GCC 12+, Clang 15+, MSVC 19.30+)
 - **MSVC users:** The `/utf-8` flag is required (the source contains unit symbols such as Ω)
+- **GCC before 14** (including ESP-IDF toolchains before GCC 14) cannot lex non-ASCII literal suffixes, so the
+  `_mΩ`, `_Ω`, `_kΩ`, `_MΩ` and `_dBµV` literals are unavailable there (`ELECTRO_HAS_UTF8_LITERALS` is 0); use the
+  ASCII alternatives `_mOhm`, `_Ohm`, `_kOhm`, `_MOhm` and `_dBuV`, which are always available
 
 ## Installation
 
@@ -31,21 +34,10 @@ include(FetchContent)
 FetchContent_Declare(
     electro
     GIT_REPOSITORY https://github.com/cleishm/electro-cpp.git
-    GIT_TAG v0.2.0
+    GIT_TAG v0.4.0
 )
 FetchContent_MakeAvailable(electro)
 
-target_link_libraries(your_target PRIVATE electro::electro)
-```
-
-### vcpkg
-
-```bash
-vcpkg install cleishm-electro-cpp
-```
-
-```cmake
-find_package(electro CONFIG REQUIRED)
 target_link_libraries(your_target PRIVATE electro::electro)
 ```
 
@@ -88,15 +80,51 @@ if (kilovolts{1} == volts{1000}) {
 
 // String conversion
 std::string s = to_string(kiloohms(10));  // "10kΩ"
-
-// Formatting: a floating-point format spec renders in display units
-// (base unit, or the conventional unit for Ah/Wh precisions), while the
-// default renders the exact stored value.
-millivolts reading{3300};
-std::string disp = std::format("{:.1f}", reading);  // "3.3V"
-std::string raw  = std::format("{}", reading);      // "3300mV" (exact stored value)
-std::format("{:.1f}", milliampere_hours(200));      // "0.2Ah"
 ```
+
+### Formatting
+
+`to_string()` and `std::format` show a quantity in its own unit: `{}` prints the
+exact stored count, and a format spec changes only how the number is rendered
+(as a `double`), never the unit:
+
+```cpp
+millivolts reading{3300};
+std::format("{}", reading);                     // "3300mV"
+std::format("{:.1f}", reading);                 // "3300.0mV"
+std::format("{:.1f}", milliampere_hours(200));  // "200.0mAh"
+```
+
+A single leading marker letter in the spec opts into a different unit; the
+rest of the spec is the usual `double` spec:
+
+| Marker | Unit | Example |
+|--------|------|---------|
+| `b` | base unit: V, A, Ω, W, C, J, F, H (Ah and Wh for the hour-based precisions) | `{:b.1f}` of `millivolts(3300)` is `"3.3V"`; of `milliampere_hours(200)` is `"0.2Ah"` |
+| `s` | scaled: the largest SI prefix (femto to tera) for which the magnitude is at least 1 | `{:s}` of `ohms(4700)` is `"4.7kΩ"`; `{:s.1f}` of `millivolts(33)` is `"33.0mV"` |
+
+```cpp
+std::format("{:b}", reading);                   // "3.3V"
+std::format("{:s.2f}", ohms(4700));             // "4.70kΩ"
+std::format("{:s>8.1f}", ohms(4700));           // "     4.7kΩ" (marker, then ">8.1f")
+to_string(reading, base_unit);                  // "3.3V"
+to_string(ohms(4700), scaled);                  // "4.7kΩ"
+```
+
+- With a marker and no further spec, or with the `base_unit`/`scaled` tags of
+  `to_string()`, the value is rendered in the shortest fixed notation that
+  round-trips (never scientific). Floating-point counts under `{}` and
+  `to_string(q)` are rendered the same way: `voltage<double>(1e6)` is
+  `"1000000V"`.
+- Under `s`, zero is shown in the unprefixed unit (`"0V"`), and the hour-based
+  precisions (mAh, Ah, Wh, kWh) have no SI prefix family, so they stay in
+  their own unit.
+- A spec beginning with `b` or `s` is always a marker, so those letters cannot
+  be used as the fill character at the start of a spec.
+- Decibel gains and levels always render in dB (or their reference, such as
+  dBm); `b` and `s` are accepted and leave the unit unchanged.
+- To show a quantity in some other unit, cast it first, e.g.
+  `quantity_cast<voltage<double>>(reading)`.
 
 ### Cross-Quantity Arithmetic
 
@@ -253,14 +281,14 @@ are ordinary quantities of `decibel_unit`.
 |----------|----------|
 | Voltage | `_uV`, `_mV`, `_V`, `_kV` |
 | Current | `_uA`, `_mA`, `_A` |
-| Resistance | `_mOhm`, `_Ohm`, `_kOhm`, `_MOhm` (also `_mΩ`, `_Ω`, `_kΩ`, `_MΩ`) |
+| Resistance | `_mOhm`, `_Ohm`, `_kOhm`, `_MOhm` (also `_mΩ`, `_Ω`, `_kΩ`, `_MΩ`, except on GCC < 14) |
 | Power | `_uW`, `_mW`, `_W`, `_kW`, `_MW` |
 | Charge | `_C`, `_mAh`, `_Ah` |
 | Energy | `_mJ`, `_J`, `_kJ`, `_Wh`, `_kWh` |
 | Capacitance | `_pF`, `_nF`, `_uF`, `_F` |
 | Inductance | `_nH`, `_uH`, `_mH`, `_H` |
 | Gain | `_dB`, `_cdB` (0.01 dB steps) |
-| Level | `_dBm`, `_cdBm`, `_dBW`, `_dBV`, `_dBmV`, `_dBuV` (also `_dBµV`) |
+| Level | `_dBm`, `_cdBm`, `_dBW`, `_dBV`, `_dBmV`, `_dBuV` (also `_dBµV`, except on GCC < 14) |
 
 Literals are integral, so fractional values use the `centi` variants
 (`1301_cdBm` is 13.01 dBm) or an explicit floating-point type. Negative levels
@@ -300,7 +328,7 @@ The library can be used as an ESP-IDF component. Add it to your project's
 
 ```yaml
 dependencies:
-  cleishm/electro: "^0.2.0"
+  cleishm/electro: "^0.4.0"
 ```
 
 `std::format` support is controlled via `CONFIG_ELECTRO_STD_FORMAT` in

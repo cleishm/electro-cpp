@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file decibel
+ * @file decibel.hpp
  * @brief Logarithmic ratios (dB) and absolute levels (dBm, dBW, dBµV, ...).
  *
  * Decibels come in two flavours, and conflating them is the classic source of
@@ -414,8 +414,8 @@ inline Offset _db_offset(double db) {
         return quantity_cast<Offset>(gain<double>(db));
     } else {
         using p = typename Offset::precision;
-        const double scaled = db * static_cast<double>(p::den) / static_cast<double>(p::num);
-        return Offset(static_cast<typename Offset::rep>(std::llround(scaled)));
+        const double ticks = db * static_cast<double>(p::den) / static_cast<double>(p::num);
+        return Offset(static_cast<typename Offset::rep>(std::llround(ticks)));
     }
 }
 /** @endcond */
@@ -596,6 +596,12 @@ using centi_dbuv = dbuv_level<int64_t, std::centi>;
  * generic quantity to_string and formatter unusable for decibel_unit, so the
  * decibel-specific overloads below are the only candidates rather than merely
  * the better-matching ones.
+ *
+ * Gains and levels always render in the same unit as `{}` (dB, or the level's
+ * reference symbol such as dBm): a format spec changes only the number
+ * formatting. They have no SI prefix family, so the `b` and `s` format markers
+ * and the base_unit and scaled to_string() tags render in that same unit,
+ * with the value in the shortest fixed notation that round-trips.
  */
 template<typename Precision>
 struct quantity_suffix<decibel_unit, Precision> {};
@@ -618,11 +624,27 @@ consteval int _decimal_places(intmax_t num, intmax_t den) {
 template<typename Precision>
 inline constexpr bool _is_decimal_precision = _decimal_places(Precision::num, Precision::den) >= 0;
 
+// A count at the given precision, in decibels, as a double.
+template<typename Precision, typename Rep>
+constexpr double _db_double(const Rep& count) {
+    return static_cast<double>(count) * Precision::num / Precision::den;
+}
+
+// A count at the given precision rendered without a format spec, in decibels.
+// Integer counts are shown exactly with one decimal place per decade of
+// precision ("10.50"); floating-point counts in the shortest fixed notation
+// that round-trips (never scientific).
 template<typename Precision, typename Rep>
 inline std::string _format_db(const Rep& count) {
     static_assert(_is_decimal_precision<Precision>, "precision cannot be rendered as a fixed-point decimal");
-    if constexpr (treat_as_inexact_v<Rep>) {
-        return std::to_string(static_cast<double>(count) * Precision::num / Precision::den);
+    if constexpr (std::floating_point<Rep>) {
+        Rep value = count;
+        if constexpr (Precision::den != 1) {
+            value /= static_cast<Rep>(Precision::den);
+        }
+        return _fixed_string(value);
+    } else if constexpr (treat_as_inexact_v<Rep>) {
+        return _fixed_string(_db_double<Precision>(count));
     } else {
         constexpr int places = _decimal_places(Precision::num, Precision::den);
         if constexpr (places == 0) {
@@ -659,12 +681,62 @@ inline std::string to_string(const quantity<decibel_unit, Rep, Precision>& g) {
 }
 
 /**
+ * @brief Converts a gain to a string in decibels, e.g. "10.5dB".
+ *
+ * A gain has no other unit, so this differs from to_string(g) only in
+ * rendering the value in the shortest fixed notation that round-trips, as by
+ * the `b` format marker.
+ */
+template<typename Rep, typename Precision>
+    requires _is_decimal_precision<typename Precision::type>
+inline std::string to_string(const quantity<decibel_unit, Rep, Precision>& g, base_unit_t) {
+    return _fixed_string(_db_double<typename Precision::type>(g.count())) + decibel_unit::symbol;
+}
+
+/**
+ * @brief Converts a gain to a string in decibels, e.g. "10.5dB".
+ *
+ * Decibels have no SI prefix family, so this is the same as
+ * to_string(g, base_unit), as by the `s` format marker.
+ */
+template<typename Rep, typename Precision>
+    requires _is_decimal_precision<typename Precision::type>
+inline std::string to_string(const quantity<decibel_unit, Rep, Precision>& g, scaled_t) {
+    return to_string(g, base_unit);
+}
+
+/**
  * @brief Converts a level to a string, e.g. "-73dBm" or "13.01dBm".
  */
 template<typename Reference, typename Rep, typename Precision>
     requires _is_decimal_precision<typename Precision::type>
 inline std::string to_string(const level<Reference, Rep, Precision>& l) {
     return _format_db<typename Precision::type>(l.count()) + Reference::symbol;
+}
+
+/**
+ * @brief Converts a level to a string against its reference, e.g. "13.01dBm".
+ *
+ * A level has no other unit, so this differs from to_string(l) only in
+ * rendering the value in the shortest fixed notation that round-trips, as by
+ * the `b` format marker.
+ */
+template<typename Reference, typename Rep, typename Precision>
+    requires _is_decimal_precision<typename Precision::type>
+inline std::string to_string(const level<Reference, Rep, Precision>& l, base_unit_t) {
+    return _fixed_string(_db_double<typename Precision::type>(l.count())) + Reference::symbol;
+}
+
+/**
+ * @brief Converts a level to a string against its reference, e.g. "13.01dBm".
+ *
+ * Levels have no SI prefix family, so this is the same as
+ * to_string(l, base_unit), as by the `s` format marker.
+ */
+template<typename Reference, typename Rep, typename Precision>
+    requires _is_decimal_precision<typename Precision::type>
+inline std::string to_string(const level<Reference, Rep, Precision>& l, scaled_t) {
+    return to_string(l, base_unit);
 }
 
 } // namespace electro
@@ -680,20 +752,34 @@ public:
     using type = electro::level<Reference, typename common_offset::rep, typename common_offset::precision>;
 };
 
+} // namespace std
+
 #if CONFIG_ELECTRO_STD_FORMAT
-// "{}" renders the exact value as a fixed-point decimal ("10.50dB"). A
-// non-empty spec is applied to the value in decibels (as double):
-// std::format("{:.1f}", 1050_cdB) == "10.5dB".
-template<typename Rep, typename Precision>
-    requires electro::_is_decimal_precision<typename Precision::type>
-struct formatter<electro::quantity<electro::decibel_unit, Rep, Precision>, char> {
+/** @cond INTERNAL */
+namespace electro {
+
+// Shared formatter for gains and levels. "{}" renders the exact value as a
+// fixed-point decimal ("10.50dB"). A non-empty spec controls only how the
+// value (in decibels, as double) is rendered, never the unit:
+// std::format("{:.1f}", 1050_cdB) == "10.5dB". The 'b' and 's' markers are
+// accepted for consistency with the other quantities; decibels have no other
+// unit, so they render in the same unit, and with nothing after the marker
+// the value is rendered in the shortest fixed notation that round-trips:
+// std::format("{:b}", 1050_cdB) == "10.5dB".
+template<typename Precision>
+struct _db_formatter {
 private:
     std::formatter<double> _num;
     bool _has_spec = false;
+    bool _marker = false;
 
 public:
-    constexpr auto parse(format_parse_context& ctx) {
+    constexpr auto parse(std::format_parse_context& ctx) {
         auto it = ctx.begin();
+        if (it != ctx.end() && (*it == 'b' || *it == 's')) {
+            _marker = true;
+            ctx.advance_to(++it);
+        }
         if (it == ctx.end() || *it == '}') {
             return it;
         }
@@ -701,53 +787,49 @@ public:
         return _num.parse(ctx);
     }
 
-    template<typename FormatContext>
-    auto format(const electro::quantity<electro::decibel_unit, Rep, Precision>& g, FormatContext& ctx) const {
+    template<typename Rep, typename FormatContext>
+    auto format(const Rep& count, const char* symbol, FormatContext& ctx) const {
+        auto out = ctx.out();
         if (_has_spec) {
-            double value = static_cast<double>(g.count()) * Precision::num / Precision::den;
-            auto out = _num.format(value, ctx);
-            return electro::_format_append(out, electro::decibel_unit::symbol);
+            out = _num.format(_db_double<Precision>(count), ctx);
+        } else if (_marker) {
+            out = std::format_to(out, "{}", _fixed_string(_db_double<Precision>(count)));
+        } else {
+            out = std::format_to(out, "{}", _format_db<Precision>(count));
         }
-        return std::format_to(
-            ctx.out(), "{}{}", electro::_format_db<typename Precision::type>(g.count()), electro::decibel_unit::symbol
-        );
+        return _format_append(out, symbol);
     }
 };
 
-// See the gain formatter above; the level's reference symbol is appended
+} // namespace electro
+/** @endcond */
+
+namespace std {
+
+// See electro::_db_formatter: "{}" -> "10.50dB", "{:.1f}" -> "10.5dB".
+template<typename Rep, typename Precision>
+    requires electro::_is_decimal_precision<typename Precision::type>
+struct formatter<electro::quantity<electro::decibel_unit, Rep, Precision>, char>
+    : electro::_db_formatter<typename Precision::type> {
+    template<typename FormatContext>
+    auto format(const electro::quantity<electro::decibel_unit, Rep, Precision>& g, FormatContext& ctx) const {
+        return electro::_db_formatter<typename Precision::type>::format(g.count(), electro::decibel_unit::symbol, ctx);
+    }
+};
+
+// See electro::_db_formatter; the level's reference symbol is appended
 // ("13.01dBm", "{:.1f}" -> "13.0dBm").
 template<typename Reference, typename Rep, typename Precision>
     requires electro::_is_decimal_precision<typename Precision::type>
-struct formatter<electro::level<Reference, Rep, Precision>, char> {
-private:
-    std::formatter<double> _num;
-    bool _has_spec = false;
-
-public:
-    constexpr auto parse(format_parse_context& ctx) {
-        auto it = ctx.begin();
-        if (it == ctx.end() || *it == '}') {
-            return it;
-        }
-        _has_spec = true;
-        return _num.parse(ctx);
-    }
-
+struct formatter<electro::level<Reference, Rep, Precision>, char> : electro::_db_formatter<typename Precision::type> {
     template<typename FormatContext>
     auto format(const electro::level<Reference, Rep, Precision>& l, FormatContext& ctx) const {
-        if (_has_spec) {
-            double value = static_cast<double>(l.count()) * Precision::num / Precision::den;
-            auto out = _num.format(value, ctx);
-            return electro::_format_append(out, Reference::symbol);
-        }
-        return std::format_to(
-            ctx.out(), "{}{}", electro::_format_db<typename Precision::type>(l.count()), Reference::symbol
-        );
+        return electro::_db_formatter<typename Precision::type>::format(l.count(), Reference::symbol, ctx);
     }
 };
-#endif
 
 } // namespace std
+#endif
 
 namespace electro_literals {
 
@@ -799,10 +881,12 @@ constexpr electro::dbuv operator""_dBuV() {
     return electro::dbuv(detail::check_overflow<electro::decibels, Digits...>());
 }
 
-/** @brief Literal for dBµV (e.g., 120_dBµV). */
+#if ELECTRO_HAS_UTF8_LITERALS
+/** @brief Literal for dBµV (e.g., 120_dBµV). Requires ELECTRO_HAS_UTF8_LITERALS. */
 template<char... Digits>
 constexpr electro::dbuv operator""_dBµV() {
     return electro::dbuv(detail::check_overflow<electro::decibels, Digits...>());
 }
+#endif
 
 } // namespace electro_literals
