@@ -26,7 +26,6 @@ target_compile_options(electro INTERFACE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 target_include_directories(electro INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
 )
 
 target_compile_features(electro INTERFACE cxx_std_20)
