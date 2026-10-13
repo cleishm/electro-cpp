@@ -1,17 +1,23 @@
 #pragma once
 
 /**
- * @file electro
+ * @file electro.hpp
  * @brief Electrical unit types and arithmetic, modeled after std::chrono.
  */
 
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <compare>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <ratio>
 #include <string>
+#include <system_error>
+#include <type_traits>
+#include <version> // pulls in __cpp_lib_format so the detection below works in non-IDF builds
 #ifndef CONFIG_ELECTRO_STD_FORMAT
 #if __has_include(<format>) && defined(__cpp_lib_format)
 #define CONFIG_ELECTRO_STD_FORMAT 1
@@ -24,6 +30,20 @@
 #include <format>
 #endif
 #include <assert.h>
+
+/**
+ * @brief 1 if the compiler accepts non-ASCII literal suffixes (e.g. `_kΩ`).
+ *
+ * GCC before 14 (including the ESP-IDF toolchains before GCC 14) cannot lex
+ * extended characters in user-defined literal suffixes, so the `_mΩ`, `_Ω`,
+ * `_kΩ`, `_MΩ` and `_dBµV` literals are omitted there; the ASCII alternatives
+ * `_mOhm`, `_Ohm`, `_kOhm`, `_MOhm` and `_dBuV` are always available.
+ */
+#if !defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 14
+#define ELECTRO_HAS_UTF8_LITERALS 1
+#else
+#define ELECTRO_HAS_UTF8_LITERALS 0
+#endif
 
 /**
  * @brief Electrical unit types and utilities.
@@ -73,6 +93,23 @@
  * auto lr = millihenries(10) / ohms(2);       // 5 ms
  * @endcode
  *
+ * ## Formatting
+ *
+ * to_string() and std::format show a quantity in its own unit by default,
+ * whatever the format spec: `{}` prints the exact count and `{:.1f}` the count
+ * as a double, each followed by the precision's suffix. A single leading
+ * marker letter in the spec, or a tag argument to to_string(), opts into a
+ * different unit:
+ *
+ * @code
+ * std::format("{}", millivolts(3300));        // "3300mV"   own unit
+ * std::format("{:.1f}", millivolts(3300));    // "3300.0mV" own unit
+ * std::format("{:b}", millivolts(3300));      // "3.3V"     base unit
+ * std::format("{:s.2f}", ohms(4700));         // "4.70kΩ"   scaled
+ * to_string(milliampere_hours(200), base_unit); // "0.2Ah"
+ * to_string(ohms(4700), scaled);              // "4.7kΩ"
+ * @endcode
+ *
  * ## Integer vs Floating-Point
  *
  * - **Integer types** (default): Exact arithmetic, support modulo operations,
@@ -108,21 +145,22 @@ inline constexpr bool is_quantity_v = is_quantity<T>::value;
 template<typename Rep>
 concept not_quantity = !is_quantity_v<Rep>;
 
+template<typename T>
+struct _is_chrono_duration : std::false_type {};
+
+template<typename Rep, typename Period>
+struct _is_chrono_duration<std::chrono::duration<Rep, Period>> : std::true_type {};
+
 /**
- * @brief Concept for duration-like types.
+ * @brief Concept for the time operands of charge and energy arithmetic.
  *
- * A type satisfies duration_like if it has the same interface as
- * std::chrono::duration:
- * - A count() method returning the tick count
- * - A nested period type (typically a std::ratio)
- * - A nested rep type (the representation type)
+ * Satisfied only by specializations of std::chrono::duration. Other types
+ * with a chrono-like shape (count(), rep and period), such as the length
+ * quantities of sibling unit libraries, are deliberately rejected so that
+ * e.g. a current times a length is not mistaken for a charge.
  */
 template<typename T>
-concept duration_like = requires(T t) {
-    { t.count() };
-    typename T::period;
-    typename T::rep;
-} && !is_quantity_v<T>;
+concept duration_like = _is_chrono_duration<std::remove_cvref_t<T>>::value;
 /** @endcond */
 
 /**
@@ -1200,12 +1238,12 @@ struct quantity_suffix<joule_unit, std::ratio<3600000>> {
 template<typename Unit, typename Precision>
 concept _has_suffix = requires { quantity_suffix<Unit, Precision>::value(); };
 
-// Display family for a (unit, precision) pair when a format spec is given:
-// the value is rendered in `scale`-sized units labeled `suffix`. SI-prefixed
-// precisions render in the base unit ("3.3V"); conventional non-decade
-// precisions render in their conventional unit ("0.2Ah", never "720.0C").
+// The unit the base-unit form (the `b` format marker, to_string(q,
+// base_unit)) renders in, as `scale`-sized units labeled `suffix`. SI-prefixed
+// precisions render in the unprefixed unit ("3.3V"); the hour-based charge and
+// energy precisions render in Ah and Wh ("0.2Ah", never "720C").
 template<typename Unit, typename Precision>
-struct _display_unit {
+struct _base_display_unit {
     using scale = std::ratio<1>;
     static constexpr const char* suffix = Unit::symbol;
 };
@@ -1221,16 +1259,154 @@ struct _watt_hour_display_unit {
 };
 
 template<>
-struct _display_unit<coulomb_unit, std::ratio<18, 5>> : _ampere_hour_display_unit {};
+struct _base_display_unit<coulomb_unit, std::ratio<18, 5>> : _ampere_hour_display_unit {};
 
 template<>
-struct _display_unit<coulomb_unit, std::ratio<3600>> : _ampere_hour_display_unit {};
+struct _base_display_unit<coulomb_unit, std::ratio<3600>> : _ampere_hour_display_unit {};
 
 template<>
-struct _display_unit<joule_unit, std::ratio<3600>> : _watt_hour_display_unit {};
+struct _base_display_unit<joule_unit, std::ratio<3600>> : _watt_hour_display_unit {};
 
 template<>
-struct _display_unit<joule_unit, std::ratio<3600000>> : _watt_hour_display_unit {};
+struct _base_display_unit<joule_unit, std::ratio<3600000>> : _watt_hour_display_unit {};
+
+// A value and suffix to display, for the base-unit and scaled forms.
+struct _display {
+    double value;
+    std::string suffix;
+};
+
+// The quantity in its base unit (see _base_display_unit), as a double.
+template<typename Unit, typename Rep, typename Precision>
+_display _base_unit_display(const quantity<Unit, Rep, Precision>& q) {
+    using display = _base_display_unit<Unit, typename Precision::type>;
+    // display units per count
+    using upc = typename std::ratio_divide<typename Precision::type, typename display::scale>::type;
+    double v = static_cast<double>(q.count());
+    if constexpr (upc::num != 1) {
+        v *= static_cast<double>(upc::num);
+    }
+    if constexpr (upc::den != 1) {
+        v /= static_cast<double>(upc::den);
+    }
+    return {v, display::suffix};
+}
+
+consteval bool _is_power_of_ten(intmax_t n) {
+    while (n >= 10 && n % 10 == 0) {
+        n /= 10;
+    }
+    return n == 1;
+}
+
+consteval int _log10(intmax_t n) {
+    int e = 0;
+    while (n >= 10) {
+        n /= 10;
+        ++e;
+    }
+    return e;
+}
+
+// Precisions that are SI prefixes (see si_prefix) of the unit.
+template<typename Precision>
+concept _si_precision =
+    requires { si_prefix<Precision>::symbol; } && _is_power_of_ten(Precision::num) && _is_power_of_ten(Precision::den);
+
+template<typename Precision>
+inline constexpr int _precision_exponent = _log10(Precision::num) - _log10(Precision::den);
+
+// 10^k as a double, exact for |k| <= 22.
+constexpr double _pow10(int k) {
+    double r = 1.0;
+    for (int i = 0; i < (k < 0 ? -k : k); ++i) {
+        r *= 10.0;
+    }
+    return r;
+}
+
+// v x 10^k with a single rounding (exact power of ten for |k| <= 22).
+constexpr double _scale_pow10(double v, int k) {
+    return k >= 0 ? v * _pow10(k) : v / _pow10(-k);
+}
+
+// The prefixes the scaled form chooses between: the si_prefix set, by
+// power-of-ten exponent, in ascending order.
+struct _scale_prefix {
+    int exponent;
+    const char* symbol;
+};
+
+inline constexpr _scale_prefix _scale_prefixes[] = {
+    {-15, si_prefix<std::femto>::symbol},
+    {-12, si_prefix<std::pico>::symbol},
+    {-9, si_prefix<std::nano>::symbol},
+    {-6, si_prefix<std::micro>::symbol},
+    {-3, si_prefix<std::milli>::symbol},
+    {0, si_prefix<std::ratio<1>>::symbol},
+    {3, si_prefix<std::kilo>::symbol},
+    {6, si_prefix<std::mega>::symbol},
+    {9, si_prefix<std::giga>::symbol},
+    {12, si_prefix<std::tera>::symbol},
+};
+
+// The quantity with the largest SI prefix for which its magnitude is at least
+// 1, else the smallest; zero (keeping its sign) and non-finite values are
+// shown in the unprefixed unit. Each candidate's value is computed from the
+// count with a single scaling by a power of ten, so values that land exactly
+// on a prefix (1000 mV) are exactly 1 in it. Precisions that are not SI
+// prefixes (mAh, Ah, Wh, kWh) are shown in their own unit.
+template<typename Unit, typename Rep, typename Precision>
+_display _scaled_display(const quantity<Unit, Rep, Precision>& q) {
+    using p = typename Precision::type;
+    const double count = static_cast<double>(q.count());
+    if constexpr (_si_precision<p>) {
+        if (count == 0 || !std::isfinite(count)) {
+            return _base_unit_display(q);
+        }
+        constexpr std::size_t n = std::extent_v<decltype(_scale_prefixes)>;
+        for (std::size_t i = n; i-- > 1;) {
+            const double v = _scale_pow10(count, _precision_exponent<p> - _scale_prefixes[i].exponent);
+            if (v >= 1.0 || v <= -1.0) {
+                return {v, std::string(_scale_prefixes[i].symbol) + Unit::symbol};
+            }
+        }
+        return {
+            _scale_pow10(count, _precision_exponent<p> - _scale_prefixes[0].exponent),
+            std::string(_scale_prefixes[0].symbol) + Unit::symbol
+        };
+    } else {
+        return {count, quantity_suffix<Unit, p>::value()};
+    }
+}
+
+// The shortest fixed-notation representation of v that round-trips: never
+// scientific notation, and no trailing zeros (2.5 -> "2.5", 1e6 -> "1000000",
+// 1e-15 -> "0.000000000000001"). Used wherever a floating-point value is
+// rendered without a format spec, so to_string and std::format agree.
+template<std::floating_point T>
+std::string _fixed_string(T v) {
+    std::string s(32, '\0');
+    for (;;) {
+        const auto result = std::to_chars(s.data(), s.data() + s.size(), v, std::chars_format::fixed);
+        if (result.ec == std::errc()) {
+            s.resize(static_cast<std::size_t>(result.ptr - s.data()));
+            return s;
+        }
+        s.resize(s.size() * 2);
+    }
+}
+
+// A count rendered without a format spec: integers exactly, floating-point
+// counts in shortest round-trip fixed notation.
+template<typename Rep>
+std::string _count_string(const Rep& r) {
+    if constexpr (std::floating_point<Rep>) {
+        return _fixed_string(r);
+    } else {
+        return std::to_string(r);
+    }
+}
 
 // Appends a NUL-terminated string to a format output iterator.
 template<typename OutputIt>
@@ -1243,21 +1419,110 @@ constexpr OutputIt _format_append(OutputIt out, const char* s) {
 /** @endcond */
 
 /**
+ * @brief Tag type selecting the base-unit form, see base_unit.
+ */
+struct base_unit_t {
+    explicit base_unit_t() = default;
+};
+
+/**
+ * @brief Selects the base-unit form in to_string().
+ *
+ * The quantity is shown in its unprefixed unit (V, A, Ω, W, C, J, F or H),
+ * except that the hour-based charge and energy precisions are shown in Ah and
+ * Wh. The value (count x precision) is rendered in the shortest fixed
+ * notation that round-trips (never scientific), exactly as by the `b` format
+ * marker.
+ *
+ * @code
+ * to_string(millivolts(3300), base_unit);       // "3.3V"
+ * to_string(kiloohms(47), base_unit);           // "47000Ω"
+ * to_string(milliampere_hours(200), base_unit); // "0.2Ah"
+ * to_string(kilowatt_hours(2), base_unit);      // "2000Wh"
+ * @endcode
+ */
+inline constexpr base_unit_t base_unit{};
+
+/**
+ * @brief Tag type selecting the scaled form, see scaled.
+ */
+struct scaled_t {
+    explicit scaled_t() = default;
+};
+
+/**
+ * @brief Selects the scaled (engineering) form in to_string().
+ *
+ * Quantities whose precision is an SI prefix are shown with the largest
+ * prefix from femto to tera (see si_prefix) for which the magnitude is at
+ * least 1, or with femto if there is none; zero is shown in the unprefixed
+ * unit. Quantities at the hour-based precisions (mAh, Ah, Wh, kWh) are shown
+ * in their own unit. The value is rendered in the shortest fixed notation
+ * that round-trips (never scientific), exactly as by the `s` format marker.
+ *
+ * @code
+ * to_string(millivolts(3300), scaled);        // "3.3V"
+ * to_string(ohms(4700), scaled);              // "4.7kΩ"
+ * to_string(microamperes(-2500), scaled);     // "-2.5mA"
+ * to_string(picofarads(100000), scaled);      // "100nF"
+ * to_string(milliampere_hours(2500), scaled); // "2500mAh"
+ * @endcode
+ */
+inline constexpr scaled_t scaled{};
+
+/**
  * @brief Converts a quantity to a string with its unit suffix.
  *
  * Available for quantities whose precision has a conventional suffix
- * (standard SI prefixes plus mAh, Ah, Wh and kWh).
+ * (standard SI prefixes plus mAh, Ah, Wh and kWh). Integer counts are shown
+ * exactly; floating-point counts in the shortest fixed notation that
+ * round-trips (never scientific).
  *
  * @code
  * to_string(millivolts(3300));       // "3300mV"
  * to_string(kiloohms(10));           // "10kΩ"
  * to_string(milliampere_hours(200)); // "200mAh"
+ * to_string(voltage<double>(1e6));   // "1000000V"
  * @endcode
  */
 template<typename Unit, typename Rep, typename Precision>
     requires _has_suffix<Unit, typename Precision::type>
 inline std::string to_string(const quantity<Unit, Rep, Precision>& q) {
-    return std::to_string(q.count()) + quantity_suffix<Unit, typename Precision::type>::value();
+    return _count_string(q.count()) + quantity_suffix<Unit, typename Precision::type>::value();
+}
+
+/**
+ * @brief Converts a quantity to a string in its base unit.
+ *
+ * Available for the same quantities as to_string(q); see base_unit.
+ *
+ * @code
+ * to_string(millivolts(3300), base_unit);       // "3.3V"
+ * to_string(milliampere_hours(200), base_unit); // "0.2Ah"
+ * @endcode
+ */
+template<typename Unit, typename Rep, typename Precision>
+    requires _has_suffix<Unit, typename Precision::type>
+inline std::string to_string(const quantity<Unit, Rep, Precision>& q, base_unit_t) {
+    const _display d = _base_unit_display(q);
+    return _fixed_string(d.value) + d.suffix;
+}
+
+/**
+ * @brief Converts a quantity to a string with an SI prefix suited to its magnitude.
+ *
+ * Available for the same quantities as to_string(q); see scaled.
+ *
+ * @code
+ * to_string(millivolts(3300), scaled);  // "3.3V"
+ * to_string(ohms(4700), scaled);        // "4.7kΩ"
+ * @endcode
+ */
+template<typename Unit, typename Rep, typename Precision>
+    requires _has_suffix<Unit, typename Precision::type>
+inline std::string to_string(const quantity<Unit, Rep, Precision>& q, scaled_t) {
+    const _display d = _scaled_display(q);
+    return _fixed_string(d.value) + d.suffix;
 }
 
 } // namespace electro
@@ -1277,23 +1542,45 @@ public:
 
 #if CONFIG_ELECTRO_STD_FORMAT
 // "{}" prints the exact stored count with a precision-qualified unit
-// (millivolts(3300) -> "3300mV"). A non-empty spec is applied to the value in
-// display units (as double): std::format("{:.1f}", millivolts(3300)) == "3.3V".
-// SI-prefixed precisions display in the base unit; conventional non-decade
-// precisions display in their conventional unit ("0.2Ah").
+// (millivolts(3300) -> "3300mV"; floating-point counts in the shortest fixed
+// notation that round-trips, as to_string does: voltage<double>(1e6) ->
+// "1000000V", never "1e+06V"). A non-empty spec controls only how the number
+// is rendered (as double), never the unit, so both forms use the same suffix:
+// std::format("{:.1f}", millivolts(3300)) == "3300.0mV" and
+// std::format("{:.1f}", milliampere_hours(200)) == "200.0mAh".
+//
+// The unit changes only when the spec opts in with a single leading marker
+// letter; the rest of the spec is then handled as above:
+// - 'b' (base unit, see electro::base_unit) shows the value in the unprefixed
+//   unit, or in Ah/Wh for the hour-based precisions:
+//   std::format("{:b.1f}", millivolts(3300)) == "3.3V".
+// - 's' (scaled, see electro::scaled) shows the value with an SI prefix
+//   suited to its magnitude: std::format("{:s}", ohms(4700)) == "4.7kΩ".
+// With 'b' or 's' and nothing after the marker, the value is rendered in the
+// shortest fixed notation that round-trips (never scientific), exactly as by
+// to_string(q, electro::base_unit) or to_string(q, electro::scaled):
+// std::format("{:b}", millivolts(24)) == "0.024V".
+//
+// A spec starting with 'b' or 's' is always a marker, so these letters cannot
+// be the fill character of a spec that starts with a fill ("{:b>8.1f}" is the
+// marker followed by ">8.1f").
 template<typename Unit, typename Rep, typename Precision>
     requires electro::_has_suffix<Unit, typename Precision::type>
 struct formatter<electro::quantity<Unit, Rep, Precision>, char> {
 private:
-    using _display = electro::_display_unit<Unit, typename Precision::type>;
-    // display units per count
-    using _upc = typename ratio_divide<typename Precision::type, typename _display::scale>::type;
+    enum class _unit_form { own, base, scaled };
+
     std::formatter<double> _num;
     bool _has_spec = false;
+    _unit_form _form = _unit_form::own;
 
 public:
     constexpr auto parse(format_parse_context& ctx) {
         auto it = ctx.begin();
+        if (it != ctx.end() && (*it == 'b' || *it == 's')) {
+            _form = *it == 'b' ? _unit_form::base : _unit_form::scaled;
+            ctx.advance_to(++it);
+        }
         if (it == ctx.end() || *it == '}') {
             return it;
         }
@@ -1303,14 +1590,23 @@ public:
 
     template<typename FormatContext>
     auto format(const electro::quantity<Unit, Rep, Precision>& q, FormatContext& ctx) const {
-        if (_has_spec) {
-            double value = static_cast<double>(q.count()) * _upc::num / _upc::den;
-            auto out = _num.format(value, ctx);
-            return electro::_format_append(out, _display::suffix);
+        if (_form != _unit_form::own) {
+            const electro::_display d =
+                _form == _unit_form::base ? electro::_base_unit_display(q) : electro::_scaled_display(q);
+            auto out = _has_spec ? _num.format(d.value, ctx)
+                                 : std::format_to(ctx.out(), "{}", electro::_fixed_string(d.value));
+            return std::format_to(out, "{}", d.suffix);
         }
-        return std::format_to(
-            ctx.out(), "{}{}", q.count(), electro::quantity_suffix<Unit, typename Precision::type>::value()
-        );
+        const std::string suffix = electro::quantity_suffix<Unit, typename Precision::type>::value();
+        if (_has_spec) {
+            auto out = _num.format(static_cast<double>(q.count()), ctx);
+            return std::format_to(out, "{}", suffix);
+        }
+        if constexpr (std::floating_point<Rep>) {
+            return std::format_to(ctx.out(), "{}{}", electro::_fixed_string(q.count()), suffix);
+        } else {
+            return std::format_to(ctx.out(), "{}{}", q.count(), suffix);
+        }
     }
 };
 #endif
@@ -1429,29 +1725,31 @@ constexpr electro::megaohms operator""_MOhm() {
     return detail::check_overflow<electro::megaohms, Digits...>();
 }
 
-/** @brief Literal for milliohms (e.g., 50_mΩ). */
+#if ELECTRO_HAS_UTF8_LITERALS
+/** @brief Literal for milliohms (e.g., 50_mΩ). Requires ELECTRO_HAS_UTF8_LITERALS. */
 template<char... Digits>
 constexpr electro::milliohms operator""_mΩ() {
     return detail::check_overflow<electro::milliohms, Digits...>();
 }
 
-/** @brief Literal for ohms (e.g., 220_Ω). */
+/** @brief Literal for ohms (e.g., 220_Ω). Requires ELECTRO_HAS_UTF8_LITERALS. */
 template<char... Digits>
 constexpr electro::ohms operator""_Ω() {
     return detail::check_overflow<electro::ohms, Digits...>();
 }
 
-/** @brief Literal for kiloohms (e.g., 10_kΩ). */
+/** @brief Literal for kiloohms (e.g., 10_kΩ). Requires ELECTRO_HAS_UTF8_LITERALS. */
 template<char... Digits>
 constexpr electro::kiloohms operator""_kΩ() {
     return detail::check_overflow<electro::kiloohms, Digits...>();
 }
 
-/** @brief Literal for megaohms (e.g., 1_MΩ). */
+/** @brief Literal for megaohms (e.g., 1_MΩ). Requires ELECTRO_HAS_UTF8_LITERALS. */
 template<char... Digits>
 constexpr electro::megaohms operator""_MΩ() {
     return detail::check_overflow<electro::megaohms, Digits...>();
 }
+#endif
 
 /** @brief Literal for microwatts (e.g., 500_uW). */
 template<char... Digits>

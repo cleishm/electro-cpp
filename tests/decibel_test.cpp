@@ -30,7 +30,9 @@ static_assert(10_dBW == dbw(10));
 static_assert(6_dBV == dbv(6));
 static_assert(40_dBmV == dbmv(40));
 static_assert(120_dBuV == dbuv(120));
+#if ELECTRO_HAS_UTF8_LITERALS
 static_assert(120_dBµV == dbuv(120));
+#endif
 
 // Gain is an ordinary quantity: it adds, subtracts, negates and scales
 static_assert(10_dB + 10_dB == 20_dB);
@@ -283,6 +285,25 @@ TEST_CASE("to_string renders decibels as decimals", "[format]") {
     REQUIRE(to_string(120_dBuV) == "120dBµV");
 }
 
+TEST_CASE("to_string renders floating-point decibels in shortest fixed notation", "[format]") {
+    REQUIRE(to_string(gain<double>(3.5)) == "3.5dB");
+    REQUIRE(to_string(gain<double>(20)) == "20dB");
+    REQUIRE(to_string(gain<double, std::centi>(1050)) == "10.5dB");
+    REQUIRE(to_string(gain<float>(0.1f)) == "0.1dB");
+    REQUIRE(to_string(dbm_level<double>(-73.5)) == "-73.5dBm");
+    REQUIRE(to_string(dbm_level<double>(1000000)) == "1000000dBm");
+}
+
+TEST_CASE("to_string with base_unit and scaled tags keeps decibels", "[format]") {
+    REQUIRE(to_string(1050_cdB, base_unit) == "10.5dB");
+    REQUIRE(to_string(1050_cdB, scaled) == "10.5dB");
+    REQUIRE(to_string(-10_dB, base_unit) == "-10dB");
+    REQUIRE(to_string(decibels(0), scaled) == "0dB");
+    REQUIRE(to_string(1301_cdBm, base_unit) == "13.01dBm");
+    REQUIRE(to_string(centi_dbm(-50), scaled) == "-0.5dBm");
+    REQUIRE(to_string(120_dBuV, scaled) == "120dBµV");
+}
+
 #if CONFIG_ELECTRO_STD_FORMAT
 TEST_CASE("std::format support for levels and gains", "[format]") {
     REQUIRE(std::format("{}", -73_dBm) == "-73dBm");
@@ -301,6 +322,34 @@ TEST_CASE("std::format with spec renders gains and levels in decibels", "[format
 
     // Width and alignment pass through to the numeric part.
     REQUIRE(std::format("{:6.1f}", 1050_cdB) == "  10.5dB");
+}
+
+TEST_CASE("std::format of floating-point decibels agrees with to_string", "[format]") {
+    REQUIRE(std::format("{}", gain<double>(3.5)) == "3.5dB");
+    REQUIRE(std::format("{}", dbm_level<double>(-73.5)) == "-73.5dBm");
+    REQUIRE(std::format("{}", dbm_level<double>(1000000)) == "1000000dBm");
+    for (double v : {0.0, 3.5, -73.25, 1e6, 0.1}) {
+        REQUIRE(std::format("{}", gain<double>(v)) == to_string(gain<double>(v)));
+        REQUIRE(std::format("{}", dbm_level<double>(v)) == to_string(dbm_level<double>(v)));
+        REQUIRE(std::format("{:b}", dbm_level<double>(v)) == to_string(dbm_level<double>(v), base_unit));
+        REQUIRE(std::format("{:s}", gain<double>(v)) == to_string(gain<double>(v), scaled));
+    }
+}
+
+TEST_CASE("std::format b and s markers keep decibels", "[format]") {
+    // Decibels have no other unit and no SI prefix family.
+    REQUIRE(std::format("{:b}", 1050_cdB) == "10.5dB");
+    REQUIRE(std::format("{:s}", 1050_cdB) == "10.5dB");
+    REQUIRE(std::format("{:b.2f}", 1050_cdB) == "10.50dB");
+    REQUIRE(std::format("{:s.1f}", 1301_cdBm) == "13.0dBm");
+    REQUIRE(std::format("{:b}", -73_dBm) == "-73dBm");
+    REQUIRE(std::format("{:s.1f}", -73_dBm) == "-73.0dBm");
+    REQUIRE(std::format("{:b}", decibels(0)) == "0dB");
+    REQUIRE(std::format("{:s}", centi_dbm(0)) == "0dBm");
+
+    // Width, fill and alignment after the marker.
+    REQUIRE(std::format("{:b6.1f}", 1050_cdB) == "  10.5dB");
+    REQUIRE(std::format("{:s_<7.1f}", -73_dBm) == "-73.0__dBm");
 }
 #endif
 

@@ -220,10 +220,12 @@ static_assert(220_Ohm == ohms(220));
 static_assert(50_mOhm == milliohms(50));
 static_assert(10_kOhm == kiloohms(10));
 static_assert(1_MOhm == megaohms(1));
+#if ELECTRO_HAS_UTF8_LITERALS
 static_assert(220_Ω == ohms(220));
 static_assert(50_mΩ == milliohms(50));
 static_assert(10_kΩ == kiloohms(10));
 static_assert(1_MΩ == megaohms(1));
+#endif
 static_assert(60_W == watts(60));
 static_assert(250_mW == milliwatts(250));
 static_assert(500_uW == microwatts(500));
@@ -262,6 +264,42 @@ static_assert(!is_quantity_v<std::chrono::seconds>);
 static_assert(treat_as_inexact_v<double>);
 static_assert(treat_as_inexact_v<float>);
 static_assert(!treat_as_inexact_v<int64_t>);
+
+// =============================================================================
+// Durations: only std::chrono::duration takes part in charge/energy arithmetic
+// =============================================================================
+
+namespace {
+
+// A type with the shape of a std::chrono::duration (count(), rep, period) that
+// is not one, such as a length quantity from a sibling unit library.
+struct chrono_shaped {
+    using rep = int64_t;
+    using period = std::ratio<1>;
+    constexpr rep count() const { return 3; }
+};
+
+template<typename A, typename B>
+concept multipliable = requires(const A& a, const B& b) { a * b; };
+
+template<typename A, typename B>
+concept divisible = requires(const A& a, const B& b) { a / b; };
+
+} // namespace
+
+static_assert(!multipliable<amperes, chrono_shaped>);
+static_assert(!multipliable<chrono_shaped, amperes>);
+static_assert(!multipliable<watts, chrono_shaped>);
+static_assert(!multipliable<chrono_shaped, watts>);
+static_assert(!divisible<coulombs, chrono_shaped>);
+static_assert(!divisible<joules, chrono_shaped>);
+
+static_assert(multipliable<amperes, std::chrono::seconds>);
+static_assert(multipliable<std::chrono::hours, watts>);
+static_assert(multipliable<current<double>, std::chrono::duration<double, std::milli>>);
+static_assert(divisible<coulombs, std::chrono::minutes>);
+static_assert(divisible<joules, std::chrono::duration<float>>);
+static_assert(amperes(2) * std::chrono::duration<int, std::milli>(500) == millicoulombs(1000));
 
 // =============================================================================
 // Runtime tests
@@ -327,6 +365,54 @@ TEST_CASE("to_string produces unit suffixes", "[format]") {
     REQUIRE(to_string(henries(1)) == "1H");
 }
 
+TEST_CASE("to_string of floating-point quantities uses shortest fixed notation", "[format]") {
+    REQUIRE(to_string(voltage<double>(2.5)) == "2.5V");
+    REQUIRE(to_string(voltage<double>(1000000)) == "1000000V");
+    REQUIRE(to_string(voltage<double, std::milli>(0.024)) == "0.024mV");
+    REQUIRE(to_string(current<float, std::milli>(0.1f)) == "0.1mA");
+    REQUIRE(to_string(voltage<double>(-3.0)) == "-3V");
+    REQUIRE(to_string(voltage<double>(0.0)) == "0V");
+}
+
+TEST_CASE("to_string with base_unit renders in the base unit", "[format]") {
+    REQUIRE(to_string(millivolts(3300), base_unit) == "3.3V");
+    REQUIRE(to_string(millivolts(24), base_unit) == "0.024V");
+    REQUIRE(to_string(kiloohms(47), base_unit) == "47000Ω");
+    REQUIRE(to_string(microamperes(-1500), base_unit) == "-0.0015A");
+    REQUIRE(to_string(volts(0), base_unit) == "0V");
+    REQUIRE(to_string(voltage<double, std::kilo>(1000), base_unit) == "1000000V");
+    // The hour-based precisions render in Ah and Wh
+    REQUIRE(to_string(milliampere_hours(200), base_unit) == "0.2Ah");
+    REQUIRE(to_string(ampere_hours(2), base_unit) == "2Ah");
+    REQUIRE(to_string(watt_hours(500), base_unit) == "500Wh");
+    REQUIRE(to_string(kilowatt_hours(2), base_unit) == "2000Wh");
+}
+
+TEST_CASE("to_string with scaled picks an SI prefix", "[format]") {
+    REQUIRE(to_string(millivolts(3300), scaled) == "3.3V");
+    REQUIRE(to_string(millivolts(33), scaled) == "33mV");
+    REQUIRE(to_string(ohms(4700), scaled) == "4.7kΩ");
+    REQUIRE(to_string(kiloohms(4700), scaled) == "4.7MΩ");
+    REQUIRE(to_string(megawatts(2500), scaled) == "2.5GW");
+    REQUIRE(to_string(gigawatts(2500), scaled) == "2.5TW");
+    REQUIRE(to_string(gigawatts(2500000), scaled) == "2500TW"); // largest prefix
+    REQUIRE(to_string(picofarads(100000), scaled) == "100nF");
+    REQUIRE(to_string(microfarads(1000), scaled) == "1mF");
+    REQUIRE(to_string(microamperes(-2500), scaled) == "-2.5mA");
+    REQUIRE(to_string(capacitance<double, std::pico>(0.5), scaled) == "500fF"); // smallest prefix
+    REQUIRE(to_string(volts(0), scaled) == "0V");
+    REQUIRE(to_string(millivolts(0), scaled) == "0V");
+    REQUIRE(to_string(voltage<double>(0.0042), scaled) == "4.2mV");
+    // Values landing exactly on a prefix are exactly 1 in it
+    REQUIRE(to_string(millivolts(1000), scaled) == "1V");
+    REQUIRE(to_string(nanohenries(1000), scaled) == "1µH");
+    // The hour-based precisions have no SI prefix family: own unit
+    REQUIRE(to_string(milliampere_hours(2500), scaled) == "2500mAh");
+    REQUIRE(to_string(ampere_hours(2), scaled) == "2Ah");
+    REQUIRE(to_string(watt_hours(1500), scaled) == "1500Wh");
+    REQUIRE(to_string(kilowatt_hours(10), scaled) == "10kWh");
+}
+
 TEST_CASE("to_string of cross-unit results", "[format]") {
     // Result precisions land on conventional suffixes
     REQUIRE(to_string(milliamperes(100) * kiloohms(2)) == "200V");
@@ -346,22 +432,88 @@ TEST_CASE("std::format support", "[format]") {
     );
 }
 
-TEST_CASE("std::format with spec renders in display units", "[format]") {
-    // A floating-point format spec renders the value in the base unit.
-    REQUIRE(std::format("{:.1f}", millivolts(3300)) == "3.3V");
-    REQUIRE(std::format("{:.2f}", millivolts(3312)) == "3.31V");
-    REQUIRE(std::format("{:.1f}", kilovolts(5)) == "5000.0V");
-    REQUIRE(std::format("{:g}", microamperes(1500)) == "0.0015A");
-    REQUIRE(std::format("{:.1f}", milliohms(4700)) == "4.7Ω");
+TEST_CASE("std::format with spec renders in the own unit", "[format]") {
+    // A format spec changes only the number formatting, never the unit.
+    REQUIRE(std::format("{:.1f}", millivolts(3300)) == "3300.0mV");
+    REQUIRE(std::format("{:.2f}", millivolts(3312)) == "3312.00mV");
+    REQUIRE(std::format("{:.1f}", kilovolts(5)) == "5.0kV");
+    REQUIRE(std::format("{:g}", microamperes(1500)) == "1500µA");
+    REQUIRE(std::format("{:.1f}", milliohms(4700)) == "4700.0mΩ");
+    REQUIRE(std::format("{:.1f}", millivolts(-3300)) == "-3300.0mV");
+    REQUIRE(std::format("{:.1f}", volts(0)) == "0.0V");
+    REQUIRE(std::format("{:.3f}", voltage<double, std::milli>(2.5)) == "2.500mV");
 
     // Width and alignment pass through to the numeric part.
-    REQUIRE(std::format("{:7.1f}", millivolts(3300)) == "    3.3V");
+    REQUIRE(std::format("{:9.1f}", millivolts(3300)) == "   3300.0mV");
 
-    // Conventional non-decade precisions render in their conventional unit.
-    REQUIRE(std::format("{:.1f}", milliampere_hours(200)) == "0.2Ah");
+    // Hour-based precisions render in their own unit too.
+    REQUIRE(std::format("{:.1f}", milliampere_hours(200)) == "200.0mAh");
     REQUIRE(std::format("{:.1f}", ampere_hours(2)) == "2.0Ah");
     REQUIRE(std::format("{:.1f}", watt_hours(500)) == "500.0Wh");
-    REQUIRE(std::format("{:.0f}", kilowatt_hours(2)) == "2000Wh");
+    REQUIRE(std::format("{:.0f}", kilowatt_hours(2)) == "2kWh");
+}
+
+TEST_CASE("std::format of floating-point quantities agrees with to_string", "[format]") {
+    REQUIRE(std::format("{}", voltage<double>(1000000)) == "1000000V");
+    REQUIRE(std::format("{}", voltage<double>(2.5)) == "2.5V");
+    REQUIRE(std::format("{}", current<float, std::milli>(0.1f)) == "0.1mA");
+    for (double v : {0.0, -0.0, 2.5, -3.0, 1e6, 1e-15, 0.1, 123456.789}) {
+        const voltage<double, std::milli> q(v);
+        REQUIRE(std::format("{}", q) == to_string(q));
+        REQUIRE(std::format("{:b}", q) == to_string(q, base_unit));
+        REQUIRE(std::format("{:s}", q) == to_string(q, scaled));
+    }
+}
+
+TEST_CASE("std::format b marker renders in the base unit", "[format]") {
+    REQUIRE(std::format("{:b.1f}", millivolts(3300)) == "3.3V");
+    REQUIRE(std::format("{:b.2f}", millivolts(3312)) == "3.31V");
+    REQUIRE(std::format("{:b.1f}", kilovolts(5)) == "5000.0V");
+    REQUIRE(std::format("{:bg}", microamperes(1500)) == "0.0015A");
+    REQUIRE(std::format("{:b.1f}", milliampere_hours(200)) == "0.2Ah");
+    REQUIRE(std::format("{:b.0f}", kilowatt_hours(2)) == "2000Wh");
+    REQUIRE(std::format("{:b.1f}", millivolts(-3300)) == "-3.3V");
+    REQUIRE(std::format("{:b.1f}", millivolts(0)) == "0.0V");
+    REQUIRE(std::format("{:b.2e}", microvolts(1500)) == "1.50e-03V");
+
+    // Without a trailing spec: shortest fixed notation, never scientific.
+    REQUIRE(std::format("{:b}", millivolts(3300)) == "3.3V");
+    REQUIRE(std::format("{:b}", millivolts(24)) == "0.024V");
+    REQUIRE(std::format("{:b}", megawatts(5)) == "5000000W");
+    REQUIRE(std::format("{:b}", milliampere_hours(200)) == "0.2Ah");
+    REQUIRE(std::format("{:b}", millivolts(-24)) == "-0.024V");
+
+    // Width, fill and alignment after the marker.
+    REQUIRE(std::format("{:b7.1f}", millivolts(3300)) == "    3.3V");
+    REQUIRE(std::format("{:b*<7.1f}", millivolts(3300)) == "3.3****V");
+    REQUIRE(std::format("{:b>6}", millivolts(24)) == " 0.024V");
+}
+
+TEST_CASE("std::format s marker picks an SI prefix", "[format]") {
+    REQUIRE(std::format("{:s}", millivolts(3300)) == "3.3V");
+    REQUIRE(std::format("{:s.1f}", millivolts(33)) == "33.0mV");
+    REQUIRE(std::format("{:s}", ohms(4700)) == "4.7kΩ");
+    REQUIRE(std::format("{:s.2f}", ohms(4700)) == "4.70kΩ");
+    REQUIRE(std::format("{:s}", picofarads(4700)) == "4.7nF");
+    REQUIRE(std::format("{:s}", microamperes(-2500)) == "-2.5mA");
+    REQUIRE(std::format("{:s.1f}", microamperes(-2500)) == "-2.5mA");
+    REQUIRE(std::format("{:s}", volts(0)) == "0V");
+    REQUIRE(std::format("{:s.1f}", millivolts(0)) == "0.0V");
+    REQUIRE(std::format("{:s}", kilowatts(1500)) == "1.5MW");
+
+    // The hour-based precisions have no SI prefix family: own unit.
+    REQUIRE(std::format("{:s}", milliampere_hours(2500)) == "2500mAh");
+    REQUIRE(std::format("{:s.1f}", watt_hours(1500)) == "1500.0Wh");
+
+    // Width, fill and alignment after the marker.
+    REQUIRE(std::format("{:s8.2f}", ohms(4700)) == "    4.70kΩ");
+    REQUIRE(std::format("{:s*^8.1f}", ohms(4700)) == "**4.7***kΩ");
+}
+
+TEST_CASE("std::format of integer counts is exact", "[format]") {
+    REQUIRE(std::format("{}", millivolts(-3300)) == "-3300mV");
+    REQUIRE(std::format("{}", volts(0)) == "0V");
+    REQUIRE(std::format("{}", megawatts(5)) == "5MW");
 }
 #endif
 
