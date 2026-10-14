@@ -1,5 +1,5 @@
-version: "0.4.1"
-description: "Type-safe electrical units library modeled after std::chrono"
+version: "0.4.2"
+description: "Superseded by cleishm/quanta: Type-safe electrical units library modeled after std::chrono"
 url: "https://github.com/cleishm/electro-cpp"
 repository: "https://github.com/cleishm/electro-cpp.git"
 license: "MIT"
